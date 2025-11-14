@@ -36,14 +36,21 @@ Route::get('/config', [ConfigController::class, 'index']);
 // Webhook (no auth)
 Route::post('/webhook/payment', [PaymentController::class, 'webhook']);
 
-// Protected routes
+//without complete-profile condition
 Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/profile', [AuthController::class, 'profile']);
+    Route::get('/profile/status', [AuthController::class, 'checkProfileStatus']);
+    Route::post('/profile/complete', [AuthController::class, 'completeProfile']);
+    Route::post('/logout', [AuthController::class, 'logout']);
+});
+
+// Protected routes
+Route::middleware(['auth:sanctum', 'profile.complete'])->group(function () {
     
     // ==========================================
     // User / Profile / Account
     // ==========================================
     Route::prefix('user')->group(function () {
-        Route::get('/profile', [AuthController::class, 'profile']);
         Route::put('/profile', [AuthController::class, 'updateProfile']);
         Route::post('/change-password', [AuthController::class, 'changePassword']);
     });
@@ -52,8 +59,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/delete-request', [AuthController::class, 'deleteRequest']);
         Route::delete('/', [AuthController::class, 'deleteAccount']);
     });
-
-    Route::post('/logout', [AuthController::class, 'logout']);
 
     // ==========================================
     // Booking / Rides (Passenger/Client)

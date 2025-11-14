@@ -225,4 +225,295 @@ class AuthController extends Controller
 
         return response()->json(['message' => 'Password reset'], 200);
     }
+
+    //profile completition function
+
+    ///////////////////////////////////////////////////////////////
+
+    public function checkProfileStatus(Request $request)
+{
+    $user = $request->user()->load(['client', 'agent']);
+    
+    $isComplete = $this->isProfileComplete($user);
+    $missingFields = $isComplete ? [] : $this->getMissingFields($user);
+    $completionPercentage = $this->calculateCompletionPercentage($user);
+
+    return response()->json([
+        'is_complete' => $isComplete,
+        'completion_percentage' => $completionPercentage,
+        'missing_fields' => $missingFields,
+        'user' => $user
+    ], 200);
+}
+
+/**
+ * Complete user profile
+ */
+public function completeProfile(Request $request)
+{
+    $user = $request->user();
+    
+    // Base validation rules
+    $rules = [
+        'first_name' => 'required|string|max:100',
+        'last_name' => 'required|string|max:100',
+        'gender' => 'required|in:male,female,other',
+        'birth_date' => 'required|date|before:today',
+        'city' => 'required|in:beirut,tripoli,sidon,tyre,other',
+        'id_card_front' => 'required|string',
+        'id_card_back' => 'required|string',
+        'bio' => 'nullable|string',
+        'profile_picture' => 'nullable|string',
+    ];
+
+    // Role-specific validation
+    if ($user->role === 'client') {
+        $rules['license_number'] = 'required|string|max:100';
+        $rules['driver_license'] = 'required|string';
+        $rules['profession'] = 'required|in:employee,freelancer,business,student,other';
+        $rules['avg_salary'] = 'required|in:200-500,500-1000,1000-2000,2000+';
+        $rules['promo_code'] = 'nullable|string|max:50';
+    } elseif ($user->role === 'agency') {
+        $rules['business_type'] = 'required|in:rental,dealer,private,company';
+        $rules['profession'] = 'required|in:manager,agent,driver,other';
+        $rules['location'] = 'required|json';
+        $rules['company_number'] = 'required_if:business_type,company|string|max:100';
+        $rules['business_doc'] = 'required_if:business_type,company|json';
+        $rules['app_fees'] = 'nullable|numeric|between:0,99.99';
+        $rules['contract_form'] = 'nullable|string';
+        $rules['policies'] = 'nullable|string';
+        $rules['website'] = 'nullable|url';
+    }
+
+    $validator = Validator::make($request->all(), $rules);
+
+    if ($validator->fails()) {
+        return response()->json(['errors' => $validator->errors()], 422);
+    }
+
+    // Update user base fields
+    $user->update($request->only([
+        'first_name', 'last_name', 'gender', 'birth_date', 
+        'city', 'id_card_front', 'id_card_back', 'bio', 'profile_picture'
+    ]));
+
+    // Update role-specific profile
+    if ($user->role === 'client') {
+        $user->client->update($request->only([
+            'license_number', 'driver_license', 'profession', 
+            'avg_salary', 'promo_code'
+        ]));
+    } elseif ($user->role === 'agency') {
+        $user->agent->update($request->only([
+            'business_type', 'profession', 'location', 'company_number',
+            'business_doc', 'app_fees', 'contract_form', 'policies', 'website'
+        ]));
+    }
+
+    return response()->json([
+        'message' => 'Profile completed successfully',
+        'user' => $user->fresh()->load(['client', 'agent'])
+    ], 200);
+}
+
+/**
+ * Update partial profile (for step-by-step completion)
+ */
+public function updatePartialProfile(Request $request)
+{
+    $user = $request->user();
+    
+    $validator = Validator::make($request->all(), [
+        'first_name' => 'sometimes|string|max:100',
+        'last_name' => 'sometimes|string|max:100',
+        'gender' => 'sometimes|in:male,female,other',
+        'birth_date' => 'sometimes|date|before:today',
+        'city' => 'sometimes|in:beirut,tripoli,sidon,tyre,other',
+        'id_card_front' => 'sometimes|string',
+        'id_card_back' => 'sometimes|string',
+        'bio' => 'nullable|string',
+        'profile_picture' => 'nullable|string',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json(['errors' => $validator->errors()], 422);
+    }
+
+    // Update only provided fields
+    $userFields = array_intersect_key(
+        $request->all(),
+        array_flip(['first_name', 'last_name', 'gender', 'birth_date', 
+                    'city', 'id_card_front', 'id_card_back', 'bio', 'profile_picture'])
+    );
+    
+    if (!empty($userFields)) {
+        $user->update($userFields);
+    }
+
+    // Update role-specific fields if provided
+    if ($user->role === 'client' && $user->client) {
+        $clientFields = array_intersect_key(
+            $request->all(),
+            array_flip(['license_number', 'driver_license', 'profession', 'avg_salary', 'promo_code'])
+        );
+        
+        if (!empty($clientFields)) {
+            $user->client->update($clientFields);
+        }
+    } elseif ($user->role === 'agency' && $user->agent) {
+        $agentFields = array_intersect_key(
+            $request->all(),
+            array_flip(['business_type', 'profession', 'location', 'company_number',
+                       'business_doc', 'app_fees', 'contract_form', 'policies', 'website'])
+        );
+        
+        if (!empty($agentFields)) {
+            $user->agent->update($agentFields);
+        }
+    }
+
+    $completionStatus = $this->checkProfileStatusInternal($user->fresh());
+
+    return response()->json([
+        'message' => 'Profile updated successfully',
+        'user' => $user->fresh()->load(['client', 'agent']),
+        'completion_status' => $completionStatus
+    ], 200);
+}
+
+/**
+ * Helper: Check if profile is complete
+ */
+private function isProfileComplete($user): bool
+{
+    $baseComplete = !empty($user->first_name) &&
+                   !empty($user->last_name) &&
+                   !empty($user->gender) &&
+                   !empty($user->birth_date) &&
+                   !empty($user->city) &&
+                   !empty($user->id_card_front) &&
+                   !empty($user->id_card_back);
+
+    if (!$baseComplete) {
+        return false;
+    }
+
+    if ($user->role === 'client') {
+        $client = $user->client;
+        return $client && 
+               !empty($client->license_number) &&
+               !empty($client->driver_license) &&
+               !empty($client->profession) &&
+               !empty($client->avg_salary);
+    } elseif ($user->role === 'agency') {
+        $agent = $user->agent;
+        if (!$agent) return false;
+        
+        $baseAgentComplete = !empty($agent->business_type) &&
+                            !empty($agent->profession) &&
+                            !empty($agent->location);
+        
+        if ($agent->business_type === 'company') {
+            return $baseAgentComplete && 
+                   !empty($agent->company_number) &&
+                   !empty($agent->business_doc);
+        }
+        
+        return $baseAgentComplete;
+    }
+
+    return true;
+}
+
+/**
+ * Helper: Get missing fields
+ */
+private function getMissingFields($user): array
+{
+    $missing = [];
+
+    if (empty($user->first_name)) $missing[] = 'first_name';
+    if (empty($user->last_name)) $missing[] = 'last_name';
+    if (empty($user->gender)) $missing[] = 'gender';
+    if (empty($user->birth_date)) $missing[] = 'birth_date';
+    if (empty($user->city)) $missing[] = 'city';
+    if (empty($user->id_card_front)) $missing[] = 'id_card_front';
+    if (empty($user->id_card_back)) $missing[] = 'id_card_back';
+
+    if ($user->role === 'client') {
+        $client = $user->client;
+        if (!$client || empty($client->license_number)) $missing[] = 'license_number';
+        if (!$client || empty($client->driver_license)) $missing[] = 'driver_license';
+        if (!$client || empty($client->profession)) $missing[] = 'profession';
+        if (!$client || empty($client->avg_salary)) $missing[] = 'avg_salary';
+    } elseif ($user->role === 'agency') {
+        $agent = $user->agent;
+        if (!$agent || empty($agent->business_type)) $missing[] = 'business_type';
+        if (!$agent || empty($agent->profession)) $missing[] = 'profession';
+        if (!$agent || empty($agent->location)) $missing[] = 'location';
+        
+        if ($agent && $agent->business_type === 'company') {
+            if (empty($agent->company_number)) $missing[] = 'company_number';
+            if (empty($agent->business_doc)) $missing[] = 'business_doc';
+        }
+    }
+
+    return $missing;
+}
+
+/**
+ * Helper: Calculate completion percentage
+ */
+private function calculateCompletionPercentage($user): int
+{
+    $totalFields = 7; // Base required fields
+    $completedFields = 0;
+
+    if (!empty($user->first_name)) $completedFields++;
+    if (!empty($user->last_name)) $completedFields++;
+    if (!empty($user->gender)) $completedFields++;
+    if (!empty($user->birth_date)) $completedFields++;
+    if (!empty($user->city)) $completedFields++;
+    if (!empty($user->id_card_front)) $completedFields++;
+    if (!empty($user->id_card_back)) $completedFields++;
+
+    if ($user->role === 'client') {
+        $totalFields += 4;
+        $client = $user->client;
+        if ($client) {
+            if (!empty($client->license_number)) $completedFields++;
+            if (!empty($client->driver_license)) $completedFields++;
+            if (!empty($client->profession)) $completedFields++;
+            if (!empty($client->avg_salary)) $completedFields++;
+        }
+    } elseif ($user->role === 'agency') {
+        $totalFields += 3;
+        $agent = $user->agent;
+        if ($agent) {
+            if (!empty($agent->business_type)) $completedFields++;
+            if (!empty($agent->profession)) $completedFields++;
+            if (!empty($agent->location)) $completedFields++;
+            
+            if ($agent->business_type === 'company') {
+                $totalFields += 2;
+                if (!empty($agent->company_number)) $completedFields++;
+                if (!empty($agent->business_doc)) $completedFields++;
+            }
+        }
+    }
+
+    return $totalFields > 0 ? round(($completedFields / $totalFields) * 100) : 0;
+}
+
+/**
+ * Helper: Internal status check
+ */
+private function checkProfileStatusInternal($user)
+{
+    return [
+        'is_complete' => $this->isProfileComplete($user),
+        'completion_percentage' => $this->calculateCompletionPercentage($user),
+        'missing_fields' => $this->getMissingFields($user)
+    ];
+}
 }
